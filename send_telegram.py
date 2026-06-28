@@ -9,18 +9,21 @@ import os
 import requests
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8918143605:AAFtJ63hmBuxPM9nfc_hA8SxMzrMAPAWm_Y")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7526986526")
+
+# 전송 대상 CHAT_ID 목록 (개인 + 그룹)
+CHAT_IDS = [
+    os.environ.get("TELEGRAM_CHAT_ID", "7526986526"),  # 개인
+    "8933734185",  # 그룹
+]
 
 
-def send_telegram_message(message: str) -> bool:
+def send_to_chat(chat_id: str, message: str) -> bool:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-    # 텔레그램 메시지 4096자 제한, 초과 시 분할 전송
     chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
 
     for i, chunk in enumerate(chunks):
         data = {
-            "chat_id": CHAT_ID,
+            "chat_id": chat_id,
             "text": chunk,
             "parse_mode": "HTML",
         }
@@ -28,9 +31,9 @@ def send_telegram_message(message: str) -> bool:
             resp = requests.post(url, data=data, timeout=10)
             result = resp.json()
             if result.get("ok"):
-                print(f"[OK] 텔레그램 전송 성공 ({i+1}/{len(chunks)})")
+                print(f"[OK] 전송 성공 → {chat_id} ({i+1}/{len(chunks)})")
             else:
-                print(f"[ERROR] 텔레그램 오류: {result}")
+                print(f"[ERROR] {chat_id} 오류: {result}")
                 return False
         except requests.exceptions.ConnectionError:
             print("[ERROR] 네트워크 연결 실패 - api.telegram.org allowlist 확인 필요")
@@ -38,8 +41,12 @@ def send_telegram_message(message: str) -> bool:
         except Exception as e:
             print(f"[ERROR] 예외: {e}")
             return False
-
     return True
+
+
+def send_telegram_message(message: str) -> bool:
+    results = [send_to_chat(chat_id, message) for chat_id in CHAT_IDS]
+    return all(results)
 
 
 if __name__ == "__main__":

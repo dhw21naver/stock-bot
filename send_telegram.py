@@ -13,7 +13,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8918143605:AAFtJ63hmBuxPM9nfc_
 # 전송 대상 CHAT_ID 목록 (개인 + 그룹)
 CHAT_IDS = [
     os.environ.get("TELEGRAM_CHAT_ID", "7526986526"),  # 개인
-    "8933734185",  # 그룹
+    "-1004459717351",  # Stock_Info_DHW 그룹
 ]
 
 

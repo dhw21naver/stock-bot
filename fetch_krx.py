@@ -1,58 +1,67 @@
 #!/usr/bin/env python3
 """
-국내 증시 데이터 수집 (pykrx 우선, 실패 시 KRX HTTP API 직접 호출)
-pykrx가 없어도 KRX 공식 API를 requests로 직접 호출
+국내 증시 데이터 수집 (네이버 금융 우선, 실패 시 KRX API)
 """
 
 import json
 import sys
-from datetime import datetime, timedelta
+import re
+from datetime import datetime
 from zoneinfo import ZoneInfo
+
+import requests
 
 KST = ZoneInfo("Asia/Seoul")
 
-def get_today_kst() -> str:
-    """오늘 날짜 (KST 기준, YYYYMMDD)"""
-    now = datetime.now(KST)
-    return now.strftime("%Y%m%d")
+NAVER_CODE = {
+    "코스피":    "0001",
+    "코스닥":    "1001",
+    "코스피200": "2001",
+}
 
-def get_prev_business_day(date_str: str) -> str:
-    """전 영업일 계산 (간단 버전: 주말 건너뜀)"""
-    dt = datetime.strptime(date_str, "%Y%m%d")
-    delta = 1
-    while True:
-        prev = dt - timedelta(days=delta)
-        if prev.weekday() < 5:  # 월~금
-            return prev.strftime("%Y%m%d")
-        delta += 1
+KRX_CODE = {
+    "코스피":    "1001",
+    "코스닥":    "2001",
+    "코스피200": "1028",
+}
 
 
-def fetch_index_pykrx(index_code: str, date_str: str) -> dict | None:
-    """pykrx로 지수 데이터 조회"""
+def fetch_naver(name: str) -> dict | None:
+    """네이버 모바일 API로 지수 데이터 수집"""
     try:
-        from pykrx import stock
-        df = stock.get_index_ohlcv(date_str, date_str, index_code)
-        if df is None or df.empty:
-            return None
-        row = df.iloc[-1]
-        return {
-            "close": float(row["종가"]),
-            "open": float(row["시가"]),
-            "high": float(row["고가"]),
-            "low": float(row["저가"]),
-            "volume": int(row["거래량"]),
+        code = NAVER_CODE[name]
+        url = f"https://m.stock.naver.com/api/index/{code}/basic"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://m.stock.naver.com",
         }
-    except ImportError:
-        return None
+        resp = requests.get(url, headers=headers, timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+
+        close = float(str(data.get("closePrice", "0")).replace(",", ""))
+        change_val = float(str(data.get("compareToPreviousClosePrice", "0")).replace(",", ""))
+        change_rate = float(str(data.get("fluctuationsRatio", "0")).replace(",", ""))
+
+        if close == 0:
+            return None
+
+        return {
+            "close": close,
+            "change_val": change_val,
+            "change_rate": change_rate,
+        }
     except Exception as e:
-        print(f"[pykrx] 오류: {e}", file=sys.stderr)
+        print(f"[Naver] {name} 오류: {e}", file=sys.stderr)
         return None
 
 
-def fetch_index_krx_api(index_code: str, date_str: str) -> dict | None:
-    """KRX 공식 HTTP API 직접 호출"""
+def fetch_krx_api(name: str) -> dict | None:
+    """KRX 공식 HTTP API"""
     try:
-        import requests
+        index_code = KRX_CODE[name]
+        now = datetime.now(KST)
+        date_str = now.strftime("%Y%m%d")
 
         url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
         headers = {
@@ -63,7 +72,6 @@ def fetch_index_krx_api(index_code: str, date_str: str) -> dict | None:
         data = {
             "bld": "dbms/MDC/STAT/standard/MDCSTAT00301",
             "locale": "ko_KR",
-            "tboxindIdx_finder_equityindisu_0": index_code,
             "indIdx": index_code,
             "indIdx2": "",
             "strtDd": date_str,
@@ -80,34 +88,15 @@ def fetch_index_krx_api(index_code: str, date_str: str) -> dict | None:
         item = items[0]
         return {
             "close": float(item.get("CLSPRC_IDX", "0").replace(",", "")),
-            "change": float(item.get("FLUC_RT", "0").replace(",", "")),
             "change_val": float(item.get("PRV_DD_CMPR", "0").replace(",", "")),
+            "change_rate": float(item.get("FLUC_RT", "0").replace(",", "")),
         }
     except Exception as e:
-        print(f"[KRX API] 오류: {e}", file=sys.stderr)
+        print(f"[KRX API] {name} 오류: {e}", file=sys.stderr)
         return None
 
 
-def get_index_data(name: str, index_code: str, date_str: str, prev_date: str) -> dict:
-    """지수 데이터 수집 (pykrx → KRX API 순서로 시도)"""
-    data = fetch_index_pykrx(index_code, date_str)
-    if data:
-        source = "pykrx"
-    else:
-        data = fetch_index_krx_api(index_code, date_str)
-        source = "krx_api" if data else "unavailable"
-
-    return {
-        "name": name,
-        "code": index_code,
-        "date": date_str,
-        "source": source,
-        "data": data,
-    }
-
-
 def format_result(results: list) -> str:
-    """결과를 카카오톡용 텍스트로 포맷"""
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     lines = [f"[국내증시] 기준: {now_kst}"]
 
@@ -115,53 +104,40 @@ def format_result(results: list) -> str:
         name = r["name"]
         d = r.get("data")
         if not d:
-            lines.append(f"  {name}: 데이터 없음 (출처: {r['source']})")
+            lines.append(f"  {name}: 데이터 없음")
             continue
 
         close = d.get("close", 0)
         change_val = d.get("change_val", 0)
-        change_rate = d.get("change", 0)
+        change_rate = d.get("change_rate", 0)
 
-        if change_val > 0:
-            arrow = "▲"
-        elif change_val < 0:
-            arrow = "▼"
-            change_val = abs(change_val)
-        else:
-            arrow = "─"
-
+        arrow = "▲" if change_val > 0 else ("▼" if change_val < 0 else "─")
         lines.append(
-            f"  {name}: {close:,.2f} "
-            f"{arrow} {change_val:+.2f} ({change_rate:+.2f}%) "
-            f"[{r['source']}]"
+            f"  {name}: {close:,.2f} {arrow} {abs(change_val):.2f} ({change_rate:+.2f}%) [{r['source']}]"
         )
 
     return "\n".join(lines)
 
 
 def main():
-    today = get_today_kst()
-    prev = get_prev_business_day(today)
-
-    indices = [
-        ("코스피", "1001"),
-        ("코스닥", "2001"),
-        ("코스피200", "1028"),
-    ]
-
+    indices = ["코스피", "코스닥", "코스피200"]
     results = []
-    for name, code in indices:
-        r = get_index_data(name, code, today, prev)
-        results.append(r)
 
-    # JSON 출력 (스케줄 작업에서 파싱용)
+    for name in indices:
+        data = fetch_naver(name)
+        source = "naver"
+        if not data:
+            data = fetch_krx_api(name)
+            source = "krx_api" if data else "unavailable"
+
+        results.append({"name": name, "source": source, "data": data})
+
     output = {
         "timestamp": datetime.now(KST).isoformat(),
         "market": "KRX",
         "results": results,
         "formatted": format_result(results),
     }
-
     print(json.dumps(output, ensure_ascii=False, indent=2))
 
 

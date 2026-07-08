@@ -1,36 +1,52 @@
 #!/usr/bin/env python3
 """
-해외 증시 데이터 수집 (yfinance 우선, 실패 시 Yahoo Finance API 직접 호출)
+해외 증시 + 환율 + 금리 + 유가 데이터 수집
 """
 
 import json
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
 
-# 주요 해외 지수
 INDICES = {
-    "나스닥": "^IXIC",
-    "S&P500": "^GSPC",
-    "다우존스": "^DJI",
-    "필라반도체(SOX)": "^SOX",
-    "러셀2000": "^RUT",
+    "나스닥":       "^IXIC",
+    "S&P500":       "^GSPC",
+    "다우존스":     "^DJI",
+    "필라반도체":   "^SOX",
+    "러셀2000":     "^RUT",
+}
+
+EXTRAS = {
+    "원/달러 환율":  "USDKRW=X",
+    "미국체 10년":   "^TNX",
+    "WTI 유가":      "CL=F",
+    "금":            "GC=F",
+}
+
+STOCKS = {
+    "삼성전자":   "005930.KS",
+    "SK하이닉스": "000660.KS",
+    "TSLA":       "TSLA",
+    "NVDA":       "NVDA",
+    "MSFT":       "MSFT",
 }
 
 
 def fetch_yfinance(ticker: str) -> dict | None:
-    """yfinance로 지수 데이터 조회"""
     try:
         import yfinance as yf
         t = yf.Ticker(ticker)
         info = t.fast_info
+        close = info.last_price
+        prev = info.previous_close
+        if not close or not prev:
+            return None
         return {
-            "close": info.last_price,
-            "prev_close": info.previous_close,
-            "change_val": info.last_price - info.previous_close,
-            "change_rate": ((info.last_price - info.previous_close) / info.previous_close) * 100,
+            "close": close,
+            "change_val": close - prev,
+            "change_rate": ((close - prev) / prev) * 100,
         }
     except ImportError:
         return None
@@ -40,102 +56,76 @@ def fetch_yfinance(ticker: str) -> dict | None:
 
 
 def fetch_yahoo_api(ticker: str) -> dict | None:
-    """Yahoo Finance API 직접 호출 (yfinance 없을 때 폴백)"""
     try:
         import requests
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        }
-        params = {
-            "interval": "1d",
-            "range": "2d",
-        }
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = requests.get(url, headers=headers, params={"interval": "1d", "range": "2d"}, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
-
-        result = data["chart"]["result"][0]
-        meta = result["meta"]
-
+        meta = resp.json()["chart"]["result"][0]["meta"]
         close = meta.get("regularMarketPrice", 0)
-        prev_close = meta.get("previousClose", meta.get("chartPreviousClose", 0))
-        change_val = close - prev_close
-        change_rate = (change_val / prev_close * 100) if prev_close else 0
-
+        prev = meta.get("previousClose", meta.get("chartPreviousClose", 0))
+        if not close or not prev:
+            return None
         return {
             "close": close,
-            "prev_close": prev_close,
-            "change_val": change_val,
-            "change_rate": change_rate,
+            "change_val": close - prev,
+            "change_rate": ((close - prev) / prev) * 100,
         }
     except Exception as e:
         print(f"[Yahoo API] {ticker} 오류: {e}", file=sys.stderr)
         return None
 
 
-def get_index_data(name: str, ticker: str) -> dict:
-    """지수 데이터 수집 (yfinance → Yahoo Finance API 순서)"""
-    data = fetch_yfinance(ticker)
-    if data:
-        source = "yfinance"
+def get_data(name: str, ticker: str) -> dict:
+    data = fetch_yfinance(ticker) or fetch_yahoo_api(ticker)
+    return {"name": name, "ticker": ticker, "source": "yfinance" if data else "unavailable", "data": data}
+
+
+def fmt_line(r: dict, is_currency: bool = False, is_rate: bool = False) -> str:
+    name = r["name"]
+    d = r.get("data")
+    if not d:
+        return f"  {name}: 데이터 없음"
+    close = d["close"]
+    change_val = d["change_val"]
+    change_rate = d["change_rate"]
+    arrow = "▲" if change_val > 0 else ("▼" if change_val < 0 else "─")
+    if is_currency:
+        return f"  {name}: {close:,.1f}원 {arrow} {abs(change_val):.1f} ({change_rate:+.2f}%)"
+    elif is_rate:
+        return f"  {name}: {close:.2f}% {arrow} {abs(change_val):.2f}%p"
+    elif close > 1000:
+        return f"  {name}: {close:,.2f} {arrow} {abs(change_val):,.2f} ({change_rate:+.2f}%)"
     else:
-        data = fetch_yahoo_api(ticker)
-        source = "yahoo_api" if data else "unavailable"
-
-    return {
-        "name": name,
-        "ticker": ticker,
-        "source": source,
-        "data": data,
-    }
+        return f"  {name}: {close:.2f} {arrow} {abs(change_val):.2f} ({change_rate:+.2f}%)"
 
 
-def format_result(results: list) -> str:
-    """결과를 카카오톡용 텍스트로 포맷"""
+def format_result(indices: list, extras: list, stocks: list) -> str:
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     lines = [f"[해외증시] 기준: {now_kst}"]
-
-    for r in results:
-        name = r["name"]
-        d = r.get("data")
-        if not d:
-            lines.append(f"  {name}: 데이터 없음 (출처: {r['source']})")
-            continue
-
-        close = d.get("close", 0)
-        change_val = d.get("change_val", 0)
-        change_rate = d.get("change_rate", 0)
-
-        if change_val > 0:
-            arrow = "▲"
-        elif change_val < 0:
-            arrow = "▼"
-        else:
-            arrow = "─"
-
-        lines.append(
-            f"  {name}: {close:,.2f} "
-            f"{arrow} {change_val:+.2f} ({change_rate:+.2f}%) "
-            f"[{r['source']}]"
-        )
-
+    lines.append("  [지수]")
+    for r in indices:
+        lines.append(fmt_line(r))
+    lines.append("  [거시경제]")
+    for r in extras:
+        lines.append(fmt_line(r, is_currency="환율" in r["name"], is_rate="국체" in r["name"] or "금리" in r["name"]))
+    lines.append("  [주요종목]")
+    for r in stocks:
+        lines.append(fmt_line(r))
     return "\n".join(lines)
 
 
 def main():
-    results = []
-    for name, ticker in INDICES.items():
-        r = get_index_data(name, ticker)
-        results.append(r)
-
+    indices = [get_data(n, t) for n, t in INDICES.items()]
+    extras = [get_data(n, t) for n, t in EXTRAS.items()]
+    stocks = [get_data(n, t) for n, t in STOCKS.items()]
     output = {
         "timestamp": datetime.now(KST).isoformat(),
         "market": "GLOBAL",
-        "results": results,
-        "formatted": format_result(results),
+        "results": indices + extras + stocks,
+        "formatted": format_result(indices, extras, stocks),
     }
-
     print(json.dumps(output, ensure_ascii=False, indent=2))
 
 

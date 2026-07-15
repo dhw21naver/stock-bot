@@ -23,6 +23,8 @@ EXTRAS = {
     "미국채 10년":   "^TNX",
     "WTI 유가":      "CL=F",
     "금":            "GC=F",
+    "VIX 공포지수":  "^VIX",
+    "달러/엔":       "JPY=X",
 }
 
 # 개별 종목
@@ -119,7 +121,7 @@ def format_result(indices: list, extras: list, stocks: list) -> str:
 
     lines.append("  [거시경제]")
     for r in extras:
-        is_currency = "환율" in r["name"]
+        is_currency = "환율" in r["name"] or "엔" in r["name"]
         is_rate = "금리" in r["name"] or "국채" in r["name"]
         lines.append(fmt_line(r, is_currency=is_currency, is_rate=is_rate))
 

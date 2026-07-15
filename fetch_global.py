@@ -20,11 +20,14 @@ INDICES = {
 
 EXTRAS = {
     "원/달러 환율":  "USDKRW=X",
-    "미국체 10년":   "^TNX",
+    "미국채 10년":   "^TNX",
     "WTI 유가":      "CL=F",
     "금":            "GC=F",
+    "VIX 공포지수":  "^VIX",
+    "달러/엔":       "JPY=X",
 }
 
+# 개별 종목
 STOCKS = {
     "삼성전자":   "005930.KS",
     "SK하이닉스": "000660.KS",
@@ -79,7 +82,12 @@ def fetch_yahoo_api(ticker: str) -> dict | None:
 
 def get_data(name: str, ticker: str) -> dict:
     data = fetch_yfinance(ticker) or fetch_yahoo_api(ticker)
-    return {"name": name, "ticker": ticker, "source": "yfinance" if data else "unavailable", "data": data}
+    return {
+        "name": name,
+        "ticker": ticker,
+        "source": "yfinance" if data else "unavailable",
+        "data": data,
+    }
 
 
 def fmt_line(r: dict, is_currency: bool = False, is_rate: bool = False) -> str:
@@ -87,12 +95,14 @@ def fmt_line(r: dict, is_currency: bool = False, is_rate: bool = False) -> str:
     d = r.get("data")
     if not d:
         return f"  {name}: 데이터 없음"
+
     close = d["close"]
     change_val = d["change_val"]
     change_rate = d["change_rate"]
     arrow = "▲" if change_val > 0 else ("▼" if change_val < 0 else "─")
+
     if is_currency:
-        return f"  {name}: {close:,.1f}원 {arrow} {abs(change_val):.1f} ({change_rate:+.2f}%)"
+        return f"  {name}: {close:,.1f} {arrow} {abs(change_val):.1f} ({change_rate:+.2f}%)"
     elif is_rate:
         return f"  {name}: {close:.2f}% {arrow} {abs(change_val):.2f}%p"
     elif close > 1000:
@@ -104,15 +114,21 @@ def fmt_line(r: dict, is_currency: bool = False, is_rate: bool = False) -> str:
 def format_result(indices: list, extras: list, stocks: list) -> str:
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     lines = [f"[해외증시] 기준: {now_kst}"]
+
     lines.append("  [지수]")
     for r in indices:
         lines.append(fmt_line(r))
+
     lines.append("  [거시경제]")
     for r in extras:
-        lines.append(fmt_line(r, is_currency="환율" in r["name"], is_rate="국체" in r["name"] or "금리" in r["name"]))
+        is_currency = "환율" in r["name"] or "엔" in r["name"]
+        is_rate = "금리" in r["name"] or "국채" in r["name"]
+        lines.append(fmt_line(r, is_currency=is_currency, is_rate=is_rate))
+
     lines.append("  [주요종목]")
     for r in stocks:
         lines.append(fmt_line(r))
+
     return "\n".join(lines)
 
 
@@ -120,6 +136,7 @@ def main():
     indices = [get_data(n, t) for n, t in INDICES.items()]
     extras = [get_data(n, t) for n, t in EXTRAS.items()]
     stocks = [get_data(n, t) for n, t in STOCKS.items()]
+
     output = {
         "timestamp": datetime.now(KST).isoformat(),
         "market": "GLOBAL",
